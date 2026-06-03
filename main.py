@@ -7,7 +7,7 @@ from cli import parse_arguments
 from utils import mostrar_img, guardar_errores_csv, dibujar_overlays_reproyeccion, guardar_resultados_json
 from rectificacion import rectificar_par_estereo, dibujar_lineas_horizontales
 from geometria_epipolar import obtener_correspondencias_aruco, ransac_fundamental, calcular_esencial
-from reconstruccion import seleccionar_pose, error_reproyeccion, visualizar_reconstruccion
+from reconstruccion import seleccionar_pose, error_reproyeccion, visualizar_reconstruccion, triangular_punto
 
 K = np.array([[3954.809289, 0.0, 2133.663739], [0.0, 3956.467881, 2889.190270], [0.0, 0.0, 1.0]])
 
@@ -30,6 +30,28 @@ def main():
     
     # 4. Triangulación
     R, t, X, _ = seleccionar_pose(E, K, p1_in, p2_in)
+
+    # --- FIJAR ESCALA MÉTRICA ---
+    # El lado del ArUco mide 12 cm (0.12 metros)
+    TAMANO_ARUCO_M = 0.12
+
+    # Calculamos P1 y P2 temporales con la traslación 't' sin escalar
+    P1_temp = K @ np.hstack([np.eye(3), np.zeros((3, 1))])
+    P2_temp = K @ np.hstack([R, t])
+
+    # Triangulamos las esquinas 0 y 1 del primer ArUco detectado (lado superior)
+    X_corner0 = triangular_punto(P1_temp, P2_temp, pts1[0], pts2[0])
+    X_corner1 = triangular_punto(P1_temp, P2_temp, pts1[1], pts2[1])
+
+    # Distancia 3D virtual y factor de escala
+    distancia_3d = np.linalg.norm(X_corner0 - X_corner1)
+    factor_escala = TAMANO_ARUCO_M / distancia_3d
+    config.info(f"[INFO] Factor de escala calculado: {factor_escala:.4f}")
+
+    # Aplicar la escala al vector de traslación y a toda la nube de puntos
+    t = t * factor_escala
+    X = X * factor_escala
+    # ---------------------------
 
     P1 = K @ np.hstack([np.eye(3), np.zeros((3, 1))])
     P2 = K @ np.hstack([R, t])
