@@ -365,13 +365,13 @@ def visualizar_reconstruccion(puntos_3d, R, t, titulo="Reconstrucción 3D"):
 
 
 def _rodrigues_to_matrix(rvec):
-    R, _ = cv2.Rodrigues(rvec)
-    return R
+    from scipy.spatial.transform import Rotation as R_scipy
+    return R_scipy.from_rotvec(rvec.ravel()).as_matrix()
 
 
 def _matrix_to_rodrigues(R):
-    rvec, _ = cv2.Rodrigues(R)
-    return rvec.ravel()
+    from scipy.spatial.transform import Rotation as R_scipy
+    return R_scipy.from_matrix(R).as_rotvec()
 
 
 def bundle_adjustment(K, r_init, t_init, X_init, pts1, pts2, max_nfev=200, two_phase=True):
@@ -391,70 +391,66 @@ def bundle_adjustment(K, r_init, t_init, X_init, pts1, pts2, max_nfev=200, two_p
     -------
     r_opt, t_opt, X_opt
     """
+def pack(rvec, tvec, X):
+    return np.hstack([rvec, tvec, X.ravel()])
+
+def unpack(x):
+    rvec = x[0:3]
+    tvec = x[3:6]
+    X = x[6:].reshape((-1, 3))
+    return rvec, tvec, X
+
+def reproj_errors(x, K, pts1, pts2):
+    rvec, tvec, X = unpack(x)
+    R = _rodrigues_to_matrix(rvec)
+
+    P1 = K @ np.hstack([np.eye(3), np.zeros((3,1))])
+    P2 = K @ np.hstack([R, tvec.reshape(3,1)])
+
+    errs = []
+    for i in range(len(X)):
+        Xh = np.append(X[i], 1.0)
+        p1 = P1 @ Xh
+        p1 = p1[:2] / (p1[2] + 1e-15)
+        p2 = P2 @ Xh
+        p2 = p2[:2] / (p2[2] + 1e-15)
+        errs.append(p1 - pts1[i])
+        errs.append(p2 - pts2[i])
+    return np.hstack(errs)
+
+def reproj_pose_only(x, K, X0, pts1, pts2):
+    rvec = x[0:3]
+    tvec = x[3:6]
+    R = _rodrigues_to_matrix(rvec)
+    P1 = K @ np.hstack([np.eye(3), np.zeros((3,1))])
+    P2 = K @ np.hstack([R, tvec.reshape(3,1)])
+    errs = []
+    for i in range(len(X0)):
+        Xh = np.append(X0[i], 1.0)
+        p1 = P1 @ Xh; p1 = p1[:2] / (p1[2] + 1e-15)
+        p2 = P2 @ Xh; p2 = p2[:2] / (p2[2] + 1e-15)
+        errs.append(p1 - pts1[i]); errs.append(p2 - pts2[i])
+    return np.hstack(errs)
+
+def bundle_adjustment(K, r_init, t_init, X_init, pts1, pts2, max_nfev=200, two_phase=True):
     n = len(X_init)
-
-    # Variables: rvec(3), t(3), X (3N)
-    def pack(rvec, tvec, X):
-        return np.hstack([rvec, tvec, X.ravel()])
-
-    def unpack(x):
-        rvec = x[0:3]
-        tvec = x[3:6]
-        X = x[6:].reshape((-1, 3))
-        return rvec, tvec, X
-
-    def reproj_errors(x):
-        rvec, tvec, X = unpack(x)
-        R = _rodrigues_to_matrix(rvec)
-
-        P1 = K @ np.hstack([np.eye(3), np.zeros((3,1))])
-        P2 = K @ np.hstack([R, tvec.reshape(3,1)])
-
-        errs = []
-        for i in range(len(X)):
-            Xh = np.append(X[i], 1.0)
-            p1 = P1 @ Xh
-            p1 = p1[:2] / (p1[2] + 1e-15)
-            p2 = P2 @ Xh
-            p2 = p2[:2] / (p2[2] + 1e-15)
-            errs.append(p1 - pts1[i])
-            errs.append(p2 - pts2[i])
-        return np.hstack(errs)
-
-    # Two-phase strategy: first optimize only rvec and t (fix X), then full BA
     rvec0 = r_init.copy()
     t0 = t_init.ravel().copy()
     X0 = X_init.copy()
 
     if two_phase:
-        # Phase 1: optimize pose only (6 variables)
-        def reproj_pose_only(x):
-            rvec = x[0:3]
-            tvec = x[3:6]
-            R = _rodrigues_to_matrix(rvec)
-            P1 = K @ np.hstack([np.eye(3), np.zeros((3,1))])
-            P2 = K @ np.hstack([R, tvec.reshape(3,1)])
-            errs = []
-            for i in range(len(X0)):
-                Xh = np.append(X0[i], 1.0)
-                p1 = P1 @ Xh; p1 = p1[:2] / (p1[2] + 1e-15)
-                p2 = P2 @ Xh; p2 = p2[:2] / (p2[2] + 1e-15)
-                errs.append(p1 - pts1[i]); errs.append(p2 - pts2[i])
-            return np.hstack(errs)
-
         x0_pose = np.hstack([rvec0, t0])
-        res1 = least_squares(reproj_pose_only, x0_pose, verbose=0, max_nfev=max_nfev//4, ftol=1e-8, xtol=1e-8, loss='huber')
+        res1 = least_squares(reproj_pose_only, x0_pose, args=(K, X0, pts1, pts2), verbose=0, max_nfev=max_nfev//4, ftol=1e-8, xtol=1e-8, loss='huber')
         rvec_opt = res1.x[0:3]
         t_opt = res1.x[3:6]
 
-        # Phase 2: joint optimize pose + points
         x0 = pack(rvec_opt, t_opt, X0)
-        res2 = least_squares(reproj_errors, x0, verbose=2, max_nfev=max_nfev, ftol=1e-8, xtol=1e-8, loss='huber')
+        res2 = least_squares(reproj_errors, x0, args=(K, pts1, pts2), verbose=2, max_nfev=max_nfev, ftol=1e-8, xtol=1e-8, loss='huber')
         rvec_opt, t_opt, X_opt = unpack(res2.x)
         return rvec_opt, t_opt.reshape(3,1), X_opt
     else:
         x0 = pack(r_init, t_init.ravel(), X_init)
-        res = least_squares(reproj_errors, x0, verbose=2, max_nfev=max_nfev, ftol=1e-8, xtol=1e-8, loss='huber')
+        res = least_squares(reproj_errors, x0, args=(K, pts1, pts2), verbose=2, max_nfev=max_nfev, ftol=1e-8, xtol=1e-8, loss='huber')
         rvec_opt, t_opt, X_opt = unpack(res.x)
         return rvec_opt, t_opt.reshape(3,1), X_opt
 

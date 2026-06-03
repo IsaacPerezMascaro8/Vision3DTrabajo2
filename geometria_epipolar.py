@@ -93,6 +93,30 @@ def alinear_esquinas_cyclic(c1, c2):
     return np.roll(c2, best_shift, axis=0)
 
 
+def compute_corner_quality(img, corners_dict):
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    gx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
+    mag = np.sqrt(gx*gx + gy*gy)
+    median_grad = np.median(mag)
+    qualities = {}
+    for mid, c in corners_dict.items():
+        q_per_corner = []
+        for (x, y) in c:
+            xi = int(round(x)); yi = int(round(y))
+            x0 = max(0, xi-2); x1 = min(gray.shape[1]-1, xi+2)
+            y0 = max(0, yi-2); y1 = min(gray.shape[0]-1, yi+2)
+            patch = mag[y0:y1+1, x0:x1+1]
+            if patch.size == 0:
+                q = 0.0
+            else:
+                q = float(np.mean(patch))
+            if median_grad > 1e-6:
+                q = q / (median_grad)
+            q_per_corner.append(q)
+        qualities[mid] = q_per_corner
+    return qualities
+
 def obtener_correspondencias_aruco(img1, img2,
                                    diccionario=cv2.aruco.DICT_4X4_50,
                                    refine_corners=False,
@@ -100,54 +124,13 @@ def obtener_correspondencias_aruco(img1, img2,
     """
     Encuentra correspondencias de puntos entre dos imágenes usando
     las esquinas de los marcadores ArUco comunes.
-
-    Retorna
-    -------
-    pts1 : np.ndarray (Nx2)
-        Puntos en la imagen 1.
-    pts2 : np.ndarray (Nx2)
-        Puntos correspondientes en la imagen 2.
-    ids_comunes : list[int]
-        IDs de los marcadores comunes encontrados.
     """
     esquinas1 = detectar_aruco(img1, diccionario, refine_corners=refine_corners)
     esquinas2 = detectar_aruco(img2, diccionario, refine_corners=refine_corners)
 
-    # If a minimum corner quality is requested, compute gradient-based
-    # quality per corner and discard entire markers whose minimum corner
-    # quality is below the threshold (relative to median image gradient).
-    def compute_corner_quality(img, corners_dict):
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        # gradient magnitude for normalization
-        gx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
-        gy = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
-        mag = np.sqrt(gx*gx + gy*gy)
-        median_grad = np.median(mag)
-        qualities = {}
-        for mid, c in corners_dict.items():
-            q_per_corner = []
-            for (x, y) in c:
-                xi = int(round(x)); yi = int(round(y))
-                # sample a small window around corner
-                x0 = max(0, xi-2); x1 = min(gray.shape[1]-1, xi+2)
-                y0 = max(0, yi-2); y1 = min(gray.shape[0]-1, yi+2)
-                patch = mag[y0:y1+1, x0:x1+1]
-                if patch.size == 0:
-                    q = 0.0
-                else:
-                    q = float(np.mean(patch))
-                # normalize by median (avoid division by zero)
-                if median_grad > 1e-6:
-                    q = q / (median_grad)
-                q_per_corner.append(q)
-            qualities[mid] = q_per_corner
-        return qualities
-
     if min_corner_quality and min_corner_quality > 0.0:
         qual1 = compute_corner_quality(img1, esquinas1)
         qual2 = compute_corner_quality(img2, esquinas2)
-        # filter markers: keep only those where min corner quality in both
-        # images is >= threshold
         good_ids = []
         for mid in sorted(set(esquinas1.keys()) & set(esquinas2.keys())):
             mq1 = min(qual1.get(mid, [0.0]))
@@ -158,26 +141,21 @@ def obtener_correspondencias_aruco(img1, img2,
     else:
         ids_comunes = sorted(set(esquinas1.keys()) & set(esquinas2.keys()))
 
-    ids_comunes = sorted(set(esquinas1.keys()) & set(esquinas2.keys()))
-
     if not ids_comunes:
-        raise RuntimeError(
-            "No se encontraron marcadores ArUco comunes entre las dos imágenes.")
+        raise RuntimeError("No se encontraron marcadores ArUco comunes entre las dos imágenes.")
 
     pts1_list = []
     pts2_list = []
     pts_marker_ids = []
     for mid in ids_comunes:
-        c1 = esquinas1[mid]   # keep detector ordering
+        c1 = esquinas1[mid]
         c2 = esquinas2[mid]
-        # align c2 to c1 by cyclic shift to account for rotated markers
         c2_aligned = alinear_esquinas_cyclic(c1, c2)
         pts1_list.append(c1)
         pts2_list.append(c2_aligned)
-        # record marker id for each of the 4 corners
         pts_marker_ids.extend([mid] * 4)
 
-    pts1 = np.vstack(pts1_list)   # (N*4, 2)
+    pts1 = np.vstack(pts1_list)
     pts2 = np.vstack(pts2_list)
     pts_marker_ids = np.array(pts_marker_ids, dtype=int)
 
