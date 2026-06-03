@@ -7,7 +7,7 @@ from cli import parse_arguments
 from utils import mostrar_img, guardar_errores_csv, dibujar_overlays_reproyeccion, guardar_resultados_json
 from rectificacion import rectificar_par_estereo, dibujar_lineas_horizontales
 from geometria_epipolar import obtener_correspondencias_aruco, ransac_fundamental, calcular_esencial
-from reconstruccion import seleccionar_pose, error_reproyeccion, visualizar_reconstruccion, bundle_adjustment
+from reconstruccion import seleccionar_pose, error_reproyeccion, visualizar_reconstruccion
 
 K = np.array([[3954.809289, 0.0, 2133.663739], [0.0, 3956.467881, 2889.190270], [0.0, 0.0, 1.0]])
 
@@ -28,16 +28,8 @@ def main():
     p1_in, p2_in = pts1[mask], pts2[mask]
     E = calcular_esencial(F, K)
     
-    # 4. Triangulación y Bundle Adjustment
+    # 4. Triangulación
     R, t, X, _ = seleccionar_pose(E, K, p1_in, p2_in)
-    if len(X) >= 4:
-        from scipy.spatial.transform import Rotation as R_scipy
-        rvec = R_scipy.from_matrix(R).as_rotvec()
-        try:
-            rvec, t, X = bundle_adjustment(K, rvec, t, X, p1_in, p2_in, max_nfev=args.ba_nfev)
-            R = R_scipy.from_rotvec(rvec.ravel()).as_matrix()
-        except Exception as e:
-            config.info(f"BA failed: {e}")
 
     P1 = K @ np.hstack([np.eye(3), np.zeros((3, 1))])
     P2 = K @ np.hstack([R, t])
