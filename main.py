@@ -6,6 +6,8 @@ import config
 from cli import parse_arguments
 from utils import mostrar_img, guardar_errores_csv, dibujar_overlays_reproyeccion, guardar_resultados_json
 from rectificacion import rectificar_par_estereo, dibujar_lineas_horizontales
+from disparidad import calcular_error_vertical, calcular_mapa_disparidad, extraer_perfiles_disparidad
+from demostracion_ssd import demostrar_busqueda_ssd
 from geometria_epipolar import obtener_correspondencias_aruco, ransac_fundamental, calcular_esencial
 from reconstruccion import seleccionar_pose, error_reproyeccion, visualizar_reconstruccion, triangular_punto
 
@@ -77,6 +79,39 @@ def main():
     )
     
     cv2.imwrite(os.path.join(outdir, 'rectified_lines_combined.png'), img_rect_lines)
+    config.info(f"[INFO] Imagen rectificada guardada en: {os.path.join(outdir, 'rectified_lines_combined.png')}")
+    # 5.1 Validación vertical después de rectificación
+    dist_null = np.zeros(5)
+    pts1_rect = cv2.undistortPoints(p1_in.astype(np.float32).reshape(-1,1,2), K, dist_null, R=R1, P=P1r).reshape(-1,2)
+    pts2_rect = cv2.undistortPoints(p2_in.astype(np.float32).reshape(-1,1,2), K, dist_null, R=R2, P=P2r).reshape(-1,2)
+    calcular_error_vertical(p1_in, p2_in, pts1_rect, pts2_rect)
+    # 5.2 Mapa de disparidad densa
+    if hasattr(args, 'usar_dino') and args.usar_dino:
+        from matching_dino import calcular_disparidad_dino
+        config.separator("MATCHING SEMÁNTICO DINOv2")
+        disparity_raw, disparity_color = calcular_disparidad_dino(img_rect1, img_rect2)
+        cv2.imwrite(os.path.join(outdir, 'dino_disparity.png'), disparity_color)
+        config.info(f"[INFO] DINO disparity map saved at: {os.path.join(outdir, 'dino_disparity.png')}")
+    elif hasattr(args, 'plane_sweep') and args.plane_sweep:
+        from plane_sweeping import plane_sweep_stereo
+        config.separator("PLANE SWEEPING ESTÉREO")
+        disparity_raw, disparity_color = plane_sweep_stereo(img_rect1, img_rect2)
+        cv2.imwrite(os.path.join(outdir, 'plane_sweep_disparity.png'), disparity_color)
+        config.info(f"[INFO] Plane sweep disparity saved at: {os.path.join(outdir, 'plane_sweep_disparity.png')}")
+    else:
+        disparity_raw, disparity_color = calcular_mapa_disparidad(img_rect1, img_rect2)
+        cv2.imwrite(os.path.join(outdir, 'disparity_map.png'), disparity_color)
+        config.info(f"[INFO] Disparity map saved at: {os.path.join(outdir, 'disparity_map.png')}")
+    # 5.3 Perfiles de disparidad
+    h = img_rect1.shape[0]
+    filas = [h // 3, 2 * h // 3]
+    extraer_perfiles_disparidad(disparity_raw, filas)
+    
+    # 5.4 Demostración SSD
+    pt_x_ssd = int(pts1_rect[0, 0])
+    pt_y_ssd = int(pts1_rect[0, 1])
+    config.info(f"[INFO] Ejecutando demostración SSD en el punto ({pt_x_ssd}, {pt_y_ssd})")
+    demostrar_busqueda_ssd(img_rect1, img_rect2, pt_x_ssd, pt_y_ssd, win_size=15)
     print("Pipeline completado. Imagen rectificada guardada en:", os.path.join(outdir, 'rectified_lines_combined.png'))
 
     if config.SHOW_GUI:

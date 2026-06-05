@@ -1,0 +1,119 @@
+"""
+Plane Sweeping Estéreo para correspondencia densa.
+
+Este algoritmo no depende de textura local como SSD/SGBM, sino de la
+coherencia de profundidad: proyecta la imagen derecha sobre un conjunto
+de planos de disparidad candidatos, acumula el error SAD con un filtro
+de suavizado y selecciona el plano ganador por píxel.
+
+Ideal para escenas con superficies planas, reflectantes o con poca textura.
+"""
+import numpy as np
+import cv2
+import config
+
+
+def plane_sweep_stereo(img_rect1, img_rect2, num_planos=64, max_disp=128,
+                       box_size=9, escala=0.5):
+    """Calcula el mapa de disparidad densa mediante Plane Sweeping.
+
+    Parameters
+    ----------
+    img_rect1, img_rect2 : ndarray (BGR, uint8)
+        Par de imágenes rectificadas.
+    num_planos : int
+        Número de planos de profundidad candidatos a evaluar.
+    max_disp : int
+        Disparidad máxima en píxeles (tras el downsampling).
+    box_size : int
+        Tamaño del filtro de caja para suavizar el volumen de coste.
+    escala : float
+        Factor de downsampling para reducir el coste computacional.
+
+    Returns
+    -------
+    disparidad_final : ndarray (float32)
+        Mapa de disparidad en píxeles (escala reducida).
+    mapa_color : ndarray (uint8, 3 canales)
+        Versión coloreada con COLORMAP_MAGMA.
+    """
+    # --- Downsampling para eficiencia ---
+    if escala != 1.0:
+        h_orig, w_orig = img_rect1.shape[:2]
+        new_h, new_w = int(h_orig * escala), int(w_orig * escala)
+        img1 = cv2.resize(img_rect1, (new_w, new_h), interpolation=cv2.INTER_AREA)
+        img2 = cv2.resize(img_rect2, (new_w, new_h), interpolation=cv2.INTER_AREA)
+        config.info(f"[PLANE SWEEP] Downsampling: {w_orig}x{h_orig} → {new_w}x{new_h}")
+    else:
+        img1 = img_rect1
+        img2 = img_rect2
+
+    # Convertir a escala de grises float32
+    gray1 = cv2.cvtColor(img1, cv2.COLOR_BGR2GRAY).astype(np.float32)
+    gray2 = cv2.cvtColor(img2, cv2.COLOR_BGR2GRAY).astype(np.float32)
+    h, w = gray1.shape
+
+    # --- Definir planos de disparidad candidatos ---
+    d_candidates = np.linspace(0, max_disp, num_planos)
+    config.info(f"[PLANE SWEEP] {num_planos} planos, disparidad 0–{max_disp} px, box={box_size}")
+
+    # --- Construir volumen de coste (H, W, num_planos) ---
+    volumen_coste = np.full((h, w, num_planos), np.inf, dtype=np.float32)
+
+    for i, d in enumerate(d_candidates):
+        d_int = int(round(d))
+        if d_int <= 0:
+            # Disparidad 0 → imágenes alineadas
+            diff = np.abs(gray1 - gray2)
+        else:
+            # Desplazar img2 horizontalmente d píxeles hacia la izquierda
+            # Equivalente a: para cada píxel (y,x) en img1,
+            # su correspondencia está en img2(y, x-d)
+            img2_shifted = np.zeros_like(gray2)
+            if d_int < w:
+                img2_shifted[:, :w - d_int] = gray2[:, d_int:]
+            diff = np.abs(gray1 - img2_shifted)
+            # Marcar la zona sin datos (borde derecho) como coste alto
+            diff[:, w - d_int:] = 255.0
+
+        # Suavizar el error con un filtro de caja (SAD sobre una región)
+        coste_suavizado = cv2.boxFilter(diff, ddepth=-1,
+                                        ksize=(box_size, box_size),
+                                        normalize=True)
+        volumen_coste[:, :, i] = coste_suavizado
+
+        # Progreso
+        if (i + 1) % max(1, num_planos // 5) == 0:
+            config.info(f"[PLANE SWEEP]   Plano {i + 1}/{num_planos} (d={d:.1f} px)")
+
+    # --- Selección del plano ganador por píxel ---
+    config.info("[PLANE SWEEP] Seleccionando disparidad óptima por píxel...")
+    idx_min = np.argmin(volumen_coste, axis=2)            # (H, W)
+    disparidad_final = d_candidates[idx_min].astype(np.float32)  # (H, W)
+    min_cost = np.min(volumen_coste, axis=2)              # (H, W)
+
+    # --- Filtrado de confianza ---
+    # Píxeles cuyo error mínimo supera la media global se consideran inválidos
+    umbral_confianza = np.mean(min_cost) * 0.8
+    mask_invalido = min_cost > umbral_confianza
+    disparidad_final[mask_invalido] = 0.0
+    # También descartar disparidad 0 (fondo)
+    disparidad_final[disparidad_final <= 0] = 0.0
+
+    n_validos = int(np.sum(disparidad_final > 0))
+    n_total = h * w
+    config.info(f"[PLANE SWEEP] Píxeles válidos: {n_validos}/{n_total} "
+                f"({100 * n_validos / n_total:.1f}%)")
+
+    # --- Normalización y colormap ---
+    disp_norm = cv2.normalize(disparidad_final, None, alpha=0, beta=255,
+                              norm_type=cv2.NORM_MINMAX)
+    disp_uint8 = np.uint8(disp_norm)
+    mapa_color = cv2.applyColorMap(disp_uint8, cv2.COLORMAP_MAGMA)
+
+    # Fondo negro puro para zonas inválidas
+    mask_negro = disparidad_final <= 0
+    mapa_color[mask_negro] = [0, 0, 0]
+
+    config.info("[PLANE SWEEP] Plane sweeping completado.")
+    return disparidad_final, mapa_color
