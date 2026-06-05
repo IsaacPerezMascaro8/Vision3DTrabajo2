@@ -12,9 +12,39 @@ import numpy as np
 import cv2
 import config
 
+NUM_PLANOS = 96
+MAX_DISP = 128
+BOX_SIZE = 7
 
-def plane_sweep_stereo(img_rect1, img_rect2, num_planos=64, max_disp=128,
-                       box_size=9, escala=0.5):
+
+def guided_filter_disparity(I, p, r=25, eps=1e-3):
+    """
+    Filtro Guiado de Kaiming He.
+    I: Imagen de guía (escala de grises original, normalizada)
+    p: Mapa de disparidad con escaleras (float32)
+    """
+    I_float = I.astype(np.float32) / 255.0
+
+    mean_I = cv2.boxFilter(I_float, -1, (r, r))
+    mean_p = cv2.boxFilter(p, -1, (r, r))
+    mean_Ip = cv2.boxFilter(I_float * p, -1, (r, r))
+    cov_Ip = mean_Ip - mean_I * mean_p
+
+    mean_II = cv2.boxFilter(I_float * I_float, -1, (r, r))
+    var_I = mean_II - mean_I * mean_I
+
+    a = cov_Ip / (var_I + eps)
+    b = mean_p - a * mean_I
+
+    mean_a = cv2.boxFilter(a, -1, (r, r))
+    mean_b = cv2.boxFilter(b, -1, (r, r))
+
+    q = mean_a * I_float + mean_b
+    return q
+
+
+def plane_sweep_stereo(img_rect1, img_rect2, num_planos=NUM_PLANOS, max_disp=MAX_DISP,
+                       box_size=BOX_SIZE, escala=0.5):
     """Calcula el mapa de disparidad densa mediante Plane Sweeping.
 
     Parameters
@@ -67,8 +97,6 @@ def plane_sweep_stereo(img_rect1, img_rect2, num_planos=64, max_disp=128,
             diff = np.abs(gray1 - gray2)
         else:
             # Desplazar img2 horizontalmente d píxeles hacia la izquierda
-            # Equivalente a: para cada píxel (y,x) en img1,
-            # su correspondencia está en img2(y, x-d)
             img2_shifted = np.zeros_like(gray2)
             if d_int < w:
                 img2_shifted[:, :w - d_int] = gray2[:, d_int:]
@@ -86,34 +114,39 @@ def plane_sweep_stereo(img_rect1, img_rect2, num_planos=64, max_disp=128,
         if (i + 1) % max(1, num_planos // 5) == 0:
             config.info(f"[PLANE SWEEP]   Plano {i + 1}/{num_planos} (d={d:.1f} px)")
 
-    # --- Selección del plano ganador por píxel ---
-    config.info("[PLANE SWEEP] Seleccionando disparidad óptima por píxel...")
-    idx_min = np.argmin(volumen_coste, axis=2)            # (H, W)
-    disparidad_final = d_candidates[idx_min].astype(np.float32)  # (H, W)
-    min_cost = np.min(volumen_coste, axis=2)              # (H, W)
+    # --- Selección Discreta y Filtro Guiado ---
+    config.info("[PLANE SWEEP] Seleccionando disparidad y aplicando Filtro Guiado...")
+    idx_min = np.argmin(volumen_coste, axis=2)
 
-    # --- Filtrado de confianza ---
-    # Píxeles cuyo error mínimo supera la media global se consideran inválidos
-    umbral_confianza = np.mean(min_cost) * 0.8
-    mask_invalido = min_cost > umbral_confianza
-    disparidad_final[mask_invalido] = 0.0
-    # También descartar disparidad 0 (fondo)
-    disparidad_final[disparidad_final <= 0] = 0.0
+    paso_disp = max_disp / (num_planos - 1)
+    disparidad_raw = (idx_min * paso_disp).astype(np.float32)
 
-    n_validos = int(np.sum(disparidad_final > 0))
+    # LA MAGIA: Aplicamos el filtro guiado usando la imagen en grises como guía
+    disparidad_smooth = guided_filter_disparity(gray1, disparidad_raw, r=25, eps=0.01)
+
+    # --- Máscara de Confianza (Proteger el suelo) ---
+    min_cost = np.min(volumen_coste, axis=2)
+    umbral = np.mean(min_cost) * 1.1
+    mask_invalido = (min_cost > umbral).astype(np.uint8)
+
+    kernel = np.ones((7, 7), np.uint8)
+    mask_invalido_limpia = cv2.morphologyEx(mask_invalido, cv2.MORPH_OPEN, kernel)
+
+    disparidad_smooth[mask_invalido_limpia == 1] = 0.0
+    disparidad_smooth[disparidad_smooth <= 0] = 0.0
+
+    n_validos = int(np.sum(disparidad_smooth > 0))
     n_total = h * w
     config.info(f"[PLANE SWEEP] Píxeles válidos: {n_validos}/{n_total} "
                 f"({100 * n_validos / n_total:.1f}%)")
 
-    # --- Normalización y colormap ---
-    disp_norm = cv2.normalize(disparidad_final, None, alpha=0, beta=255,
-                              norm_type=cv2.NORM_MINMAX)
+    # --- Normalización Visual ---
+    disp_norm = cv2.normalize(disparidad_smooth, None, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX)
     disp_uint8 = np.uint8(disp_norm)
     mapa_color = cv2.applyColorMap(disp_uint8, cv2.COLORMAP_MAGMA)
 
-    # Fondo negro puro para zonas inválidas
-    mask_negro = disparidad_final <= 0
+    mask_negro = disparidad_smooth <= 0
     mapa_color[mask_negro] = [0, 0, 0]
 
     config.info("[PLANE SWEEP] Plane sweeping completado.")
-    return disparidad_final, mapa_color
+    return disparidad_smooth, mapa_color
