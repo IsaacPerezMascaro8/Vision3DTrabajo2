@@ -9,7 +9,7 @@ from rectificacion import rectificar_par_estereo, dibujar_lineas_horizontales
 from disparidad import calcular_error_vertical, calcular_mapa_disparidad, extraer_perfiles_disparidad
 from demostracion_ssd import demostrar_busqueda_ssd
 from geometria_epipolar import obtener_correspondencias_aruco, ransac_fundamental, calcular_esencial
-from reconstruccion import seleccionar_pose, error_reproyeccion, visualizar_reconstruccion, triangular_punto
+from reconstruccion import seleccionar_pose, error_reproyeccion, visualizar_reconstruccion_3d, triangular_punto
 
 K = np.array([[3954.809289, 0.0, 2133.663739], [0.0, 3956.467881, 2889.190270], [0.0, 0.0, 1.0]])
 
@@ -28,6 +28,7 @@ def main():
     # 3. Matriz Fundamental y Esencial
     F, mask = ransac_fundamental(pts1, pts2, umbral=args.ransac_threshold, max_iter=5000, marker_ids=p_ids)
     p1_in, p2_in = pts1[mask], pts2[mask]
+    p_ids_in = p_ids[mask]   # ArUco IDs filtrados por inliers RANSAC
     E = calcular_esencial(F, K)
     
     # 4. Triangulación
@@ -69,6 +70,9 @@ def main():
         guardar_errores_csv(outdir, len(X), p1_in, p2_in, reproj1, reproj2, err1_arr, err2_arr)
         dibujar_overlays_reproyeccion(img1, img2, outdir, len(X), p1_in, p2_in, reproj1, reproj2, err1_arr, err2_arr)
         guardar_resultados_json({'K': K.tolist(), 'err1': np.mean(err1_arr), 'err2': np.mean(err2_arr)}, outdir)
+
+    # Visualización 3D (siempre se ejecuta: en GUI muestra ventana, sin GUI guarda PNG)
+    visualizar_reconstruccion_3d(X, p_ids_in, R, t, titulo="Reconstrucción 3D métrica")
 
     # 5. Rectificación y dibujo de líneas horizontales
     img_rect1, img_rect2, R1, P1r, R2, P2r = rectificar_par_estereo(img1, img2, K, R, t)
@@ -117,7 +121,6 @@ def main():
     if config.SHOW_GUI:
         ratio = 1200 / img_rect_lines.shape[1]
         cv2.imshow("Rectificacion Perfecta", cv2.resize(img_rect_lines, None, fx=ratio, fy=ratio))
-        visualizar_reconstruccion(X, R, t, titulo="Reconstrucción 3D")
         cv2.waitKey(0)
         cv2.destroyAllWindows()
 

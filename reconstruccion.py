@@ -13,6 +13,7 @@ import numpy as np
 import cv2
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
+from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 import config
 import os
 from scipy.optimize import least_squares
@@ -301,49 +302,162 @@ def error_reproyeccion(K, R, t, puntos_3d, pts1, pts2):
 
 
 # ---------------------------------------------------------------------------
-# 5. Visualización 3D
+# 5. Visualización 3D  (versión académica con agrupación por ArUco)
 # ---------------------------------------------------------------------------
 
-def visualizar_reconstruccion(puntos_3d, R, t, titulo="Reconstrucción 3D"):
+# Paleta de colores distinguibles para los IDs de ArUco
+_ARUCO_COLORS = [
+    '#e6194b', '#3cb44b', '#4363d8', '#f58231', '#911eb4',
+    '#42d4f4', '#f032e6', '#bfef45', '#fabed4', '#469990',
+    '#dcbeff', '#9A6324', '#800000', '#aaffc3', '#808000',
+    '#ffd8b1', '#000075', '#a9a9a9',
+]
+
+
+def visualizar_reconstruccion_3d(puntos_3d, aruco_ids, R, t_escalada,
+                                  titulo="Reconstrucción 3D métrica"):
     """
-    Visualiza la nube de puntos 3D reconstruida junto con las posiciones
-    de las dos cámaras.
+    Genera un gráfico 3D de calidad académica para un informe PDF.
+
+    Parámetros
+    ----------
+    puntos_3d : np.ndarray (Nx3)
+        Puntos 3D triangulados y ya escalados a metros.
+    aruco_ids : np.ndarray (N,)
+        ID de ArUco correspondiente a cada punto (misma longitud que puntos_3d).
+    R : np.ndarray (3x3)
+        Rotación de la cámara 2 respecto a la cámara 1.
+    t_escalada : np.ndarray (3x1)
+        Vector de traslación escalado a metros.
+    titulo : str
+        Título del gráfico.
     """
-    fig = plt.figure(figsize=(12, 9))
+
+    fig = plt.figure(figsize=(14, 10))
     ax = fig.add_subplot(111, projection='3d')
 
-    # Nube de puntos
-    ax.scatter(puntos_3d[:, 0], puntos_3d[:, 1], puntos_3d[:, 2],
-               c='steelblue', marker='o', s=40, alpha=0.8, label='Puntos 3D')
+    # ------------------------------------------------------------------
+    # Nube de puntos agrupada por ArUco ID
+    # ------------------------------------------------------------------
+    unique_ids = np.unique(aruco_ids)
+    for idx, aid in enumerate(unique_ids):
+        color = _ARUCO_COLORS[idx % len(_ARUCO_COLORS)]
+        mask = aruco_ids == aid
+        pts = puntos_3d[mask]
+        ax.scatter(pts[:, 0], pts[:, 1], pts[:, 2],
+                   c=color, marker='o', s=60, alpha=0.9,
+                   edgecolors='k', linewidths=0.4,
+                   label=f'ArUco ID {aid}')
+        # Anotar las esquinas con números pequeños
+        for j, (x, y, z) in enumerate(pts):
+            ax.text(x, y, z, f' {j}', fontsize=7, color=color, alpha=0.7)
 
-    # Cámara 1 en el origen
-    ax.scatter(0, 0, 0, c='red', marker='^', s=200, label='Cámara 1')
+    # ------------------------------------------------------------------
+    # Cámara 1 — en el origen
+    # ------------------------------------------------------------------
+    ax.scatter(0, 0, 0, c='red', marker='^', s=250, zorder=5,
+               edgecolors='darkred', linewidths=1.2, label='Cámara 1 (origen)')
+
+    # ------------------------------------------------------------------
+    # Cámara 2 — centro óptico real  C₂ = −Rᵀ · t_escalada
+    # ------------------------------------------------------------------
+    C2 = (-R.T @ t_escalada).ravel()
+    ax.scatter(C2[0], C2[1], C2[2], c='blue', marker='^', s=250, zorder=5,
+               edgecolors='darkblue', linewidths=1.2, label='Cámara 2')
+
+    # ------------------------------------------------------------------
+    # Ejes de orientación de cada cámara  (R, G, B → X, Y, Z)
+    # ------------------------------------------------------------------
+    # Escala de los ejes proporcional a la escena
+    all_pts = np.vstack([puntos_3d, [[0, 0, 0]], [C2]])
+    escala_ejes = np.max(np.ptp(all_pts, axis=0)) * 0.12
+    if escala_ejes < 1e-6:
+        escala_ejes = 0.05
+
+    eje_labels = ['X', 'Y', 'Z']
+    eje_colors = ['r', 'g', 'b']
+
+    # Cámara 1 (identidad)
+    for eje, col, lbl in zip(np.eye(3), eje_colors, eje_labels):
+        ax.quiver(0, 0, 0, eje[0], eje[1], eje[2],
+                  length=escala_ejes, color=col, linewidth=2, arrow_length_ratio=0.15)
 
     # Cámara 2
-    C2 = (-R.T @ t).ravel()
-    ax.scatter(C2[0], C2[1], C2[2], c='green', marker='^', s=200,
-               label='Cámara 2')
-
-    # Ejes de la cámara 1
-    escala = np.max(np.abs(puntos_3d)) * 0.2
-    for eje, color_eje in zip(np.eye(3), ['r', 'g', 'b']):
-        ax.quiver(0, 0, 0, eje[0], eje[1], eje[2],
-                  length=escala, color=color_eje, linewidth=2)
-
-    # Ejes de la cámara 2
-    for eje, color_eje in zip(R.T, ['r', 'g', 'b']):
+    for eje, col in zip(R.T, eje_colors):
         ax.quiver(C2[0], C2[1], C2[2], eje[0], eje[1], eje[2],
-                  length=escala, color=color_eje, linewidth=2, alpha=0.6)
+                  length=escala_ejes, color=col, linewidth=2,
+                  alpha=0.6, arrow_length_ratio=0.15)
 
-    ax.set_xlabel('X')
-    ax.set_ylabel('Y')
-    ax.set_zlabel('Z')
-    ax.set_title(titulo)
-    ax.legend(loc='upper left')
+    # Línea base entre cámaras (baseline)
+    ax.plot([0, C2[0]], [0, C2[1]], [0, C2[2]],
+            'k--', linewidth=1.0, alpha=0.5, label='Baseline')
 
-    # Ajustar aspecto (robusto ante datos con rango pequeño)
-    all_pts = np.vstack([puntos_3d, [[0, 0, 0]], [C2]])
-    max_range = max(np.ptp(all_pts, axis=0)) * 0.6
+    # ------------------------------------------------------------------
+    # Planos de imagen simulados (frustums de cámara)
+    # ------------------------------------------------------------------
+    def _dibujar_frustum(ax, centro, R_cam, escala, color, alpha_face=0.12):
+        """
+        Dibuja un tronco de pirámide (frustum) simplificado:
+          - Un rectángulo (plano de imagen) delante de la cámara.
+          - 4 aristas desde el centro óptico a las esquinas del plano.
+
+        R_cam : columnas = ejes de la cámara en el mundo (3x3).
+        """
+        # Definir las 4 esquinas del plano de imagen en coordenadas locales
+        # de la cámara:  ±hw en X,  ±hh en Y,  +d en Z  (delante)
+        hw = escala * 0.55   # mitad del ancho
+        hh = escala * 0.40   # mitad del alto (ratio ~4:3)
+        d  = escala * 0.9    # distancia focal visual
+
+        esquinas_local = np.array([
+            [-hw, -hh, d],
+            [ hw, -hh, d],
+            [ hw,  hh, d],
+            [-hw,  hh, d],
+        ])
+
+        # Transformar al mundo: P_world = centro + R_cam @ P_local
+        esquinas_world = (R_cam @ esquinas_local.T).T + centro
+
+        # Dibujar el plano de imagen (polígono relleno semitransparente)
+        verts = [esquinas_world.tolist()]
+        poly = Poly3DCollection(verts, alpha=alpha_face, facecolors=color,
+                                edgecolors=color, linewidths=1.2)
+        ax.add_collection3d(poly)
+
+        # Aristas del frustum: centro → cada esquina
+        for corner in esquinas_world:
+            ax.plot([centro[0], corner[0]],
+                    [centro[1], corner[1]],
+                    [centro[2], corner[2]],
+                    color=color, linewidth=0.8, alpha=0.45)
+
+        # Contorno del plano de imagen (cerrar el rectángulo)
+        for i in range(4):
+            j = (i + 1) % 4
+            ax.plot([esquinas_world[i, 0], esquinas_world[j, 0]],
+                    [esquinas_world[i, 1], esquinas_world[j, 1]],
+                    [esquinas_world[i, 2], esquinas_world[j, 2]],
+                    color=color, linewidth=1.2, alpha=0.7)
+
+    # Cámara 1: R = I, centro en el origen
+    _dibujar_frustum(ax, np.array([0, 0, 0]), np.eye(3), escala_ejes, 'red')
+    # Cámara 2: R = R.T (columnas = ejes mundo), centro en C2
+    _dibujar_frustum(ax, C2, R.T, escala_ejes, 'blue')
+
+    # ------------------------------------------------------------------
+    # Etiquetas y título
+    # ------------------------------------------------------------------
+    ax.set_xlabel('X (metros)', fontsize=12, labelpad=10)
+    ax.set_ylabel('Y (metros)', fontsize=12, labelpad=10)
+    ax.set_zlabel('Z — Profundidad (metros)', fontsize=12, labelpad=10)
+    ax.set_title(titulo, fontsize=14, fontweight='bold', pad=20)
+    ax.legend(loc='upper left', fontsize=9, framealpha=0.85)
+
+    # ------------------------------------------------------------------
+    # Escala isométrica 1:1:1
+    # ------------------------------------------------------------------
+    max_range = np.max(np.ptp(all_pts, axis=0)) * 0.6
     if max_range < 1e-6:
         max_range = 1.0
     mid = np.mean(all_pts, axis=0)
@@ -351,17 +465,45 @@ def visualizar_reconstruccion(puntos_3d, R, t, titulo="Reconstrucción 3D"):
     ax.set_ylim(mid[1] - max_range, mid[1] + max_range)
     ax.set_zlim(mid[2] - max_range, mid[2] + max_range)
 
+    # En visión, Y apunta hacia abajo → invertir para que el suelo quede abajo
+    ax.invert_yaxis()
+
+    # Forzar aspecto igual en matplotlib ≥ 3.3
+    try:
+        ax.set_box_aspect([1, 1, 1])
+    except AttributeError:
+        pass  # versiones antiguas de matplotlib
+
     plt.tight_layout()
-    # Si no hay GUI, guardar la figura en output/
+
+    # ------------------------------------------------------------------
+    # Guardar o mostrar
+    # ------------------------------------------------------------------
     if not config.SHOW_GUI:
         outdir = config.ensure_output_dir('output')
-        save_path = titulo if os.path.isabs(titulo) or titulo.endswith('.png') else os.path.join(outdir, f"{titulo.replace(' ', '_')}.png")
+        if os.path.isabs(titulo) or titulo.endswith('.png'):
+            save_path = titulo
+        else:
+            save_path = os.path.join(outdir,
+                                     f"{titulo.replace(' ', '_')}.png")
         config.info(f"[INFO] Guardando visualización 3D en: {save_path}")
-        plt.savefig(save_path)
+        plt.savefig(save_path, dpi=200, bbox_inches='tight')
         plt.close(fig)
     else:
         config.info("[INFO] Mostrando visualización 3D...")
         plt.show()
+
+    # ------------------------------------------------------------------
+    # Verificación métrica por consola
+    # ------------------------------------------------------------------
+    primer_id = unique_ids[0]
+    mask_primer = aruco_ids == primer_id
+    pts_primer = puntos_3d[mask_primer]
+    if len(pts_primer) >= 2:
+        dist_lado = np.linalg.norm(pts_primer[0] - pts_primer[1])
+        print(f"\n[VERIFICACIÓN MÉTRICA] Distancia 3D comprobada en "
+              f"el marcador {primer_id} (esquina 0 → esquina 1): "
+              f"{dist_lado:.4f} metros")
 
 
 def _rodrigues_to_matrix(rvec):
