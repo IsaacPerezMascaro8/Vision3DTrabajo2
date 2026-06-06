@@ -12,7 +12,7 @@ def parse_arguments():
     parser.add_argument('--ransac-threshold', type=float, default=2.0, help='Umbral Sampson (px) para RANSAC')
     parser.add_argument('--filter-reproj', type=float, default=30.0, help='Umbral filtro reproyección')
     parser.add_argument('--usar-dino', action='store_true', help='Usar DINOv2 para matching semántico en lugar de SGBM')
-    parser.add_argument('--plane-sweep', action='store_true', help='Usar Plane Sweeping Estéreo en lugar de SGBM')
+    parser.add_argument('--plane-sweep', action='store_true', default=True, help='Usar Plane Sweeping Estéreo en lugar de SGBM (por defecto)')
     
     args, _ = parser.parse_known_args()
 
