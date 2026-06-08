@@ -11,7 +11,11 @@ from demostracion_ssd import demostrar_busqueda_ssd
 from geometria_epipolar import obtener_correspondencias_aruco, ransac_fundamental, calcular_esencial
 from reconstruccion import seleccionar_pose, error_reproyeccion, visualizar_reconstruccion_3d, triangular_punto
 
-K = np.array([[3954.809289, 0.0, 2133.663739], [0.0, 3956.467881, 2889.190270], [0.0, 0.0, 1.0]])
+K = np.array([
+    [3990.1574415286, 0.0, 2818.2271080190],
+    [0.0, 3988.4486191714, 2135.8102621727],
+    [0.0, 0.0, 1.0],
+])
 
 def main():
     args, outdir = parse_arguments()
@@ -35,8 +39,8 @@ def main():
     R, t, X, _ = seleccionar_pose(E, K, p1_in, p2_in)
 
     # --- FIJAR ESCALA MÉTRICA ---
-    # El lado del ArUco mide 12 cm (0.12 metros)
-    TAMANO_ARUCO_M = 0.12
+    # El lado del ArUco mide 6.2 cm (0.062 metros)
+    TAMANO_ARUCO_M = 0.062
 
     # Calculamos P1 y P2 temporales con la traslación 't' sin escalar
     P1_temp = K @ np.hstack([np.eye(3), np.zeros((3, 1))])
@@ -83,7 +87,9 @@ def main():
     )
     
     cv2.imwrite(os.path.join(outdir, 'rectified_lines_combined.png'), img_rect_lines)
-    config.info(f"[INFO] Imagen rectificada guardada en: {os.path.join(outdir, 'rectified_lines_combined.png')}")
+    cv2.imwrite(os.path.join(outdir, 'rectified_left.png'), img_rect1)
+    cv2.imwrite(os.path.join(outdir, 'rectified_right.png'), img_rect2)
+    config.info(f"[INFO] Imágenes rectificadas guardadas en: {outdir}/")
     # 5.1 Validación vertical después de rectificación
     dist_null = np.zeros(5)
     pts1_rect = cv2.undistortPoints(p1_in.astype(np.float32).reshape(-1,1,2), K, dist_null, R=R1, P=P1r).reshape(-1,2)

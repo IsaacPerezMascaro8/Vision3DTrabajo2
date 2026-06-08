@@ -134,4 +134,3 @@ def plane_sweep_stereo(img_rect1, img_rect2, num_planos=NUM_PLANOS, max_disp=MAX
         mapa_color[:, w - margen_der:] = [0, 0, 0]
 
     return disparidad_smooth, mapa_color
-
