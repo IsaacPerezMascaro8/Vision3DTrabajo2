@@ -17,61 +17,150 @@ import config
 # 1. Detección de correspondencias ArUco
 # ---------------------------------------------------------------------------
 
-def detectar_aruco(imagen, diccionario=cv2.aruco.DICT_4X4_50, refine_corners=False):
+def _corner_sharpness(gray, corners):
     """
-    Detecta marcadores ArUco en una imagen y devuelve las esquinas
-    organizadas por ID, con parámetros optimizados para esquinas y sombras.
+    Evalúa la calidad de las esquinas midiendo la magnitud media del gradiente
+    alrededor de cada esquina. Cuanto mayor, más nítida y fiable la detección.
+    """
+    gx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
+    mag = np.sqrt(gx * gx + gy * gy)
+    total = 0.0
+    for (x, y) in corners.reshape(-1, 2):
+        xi, yi = int(round(x)), int(round(y))
+        x0 = max(0, xi - 3); x1 = min(gray.shape[1] - 1, xi + 3)
+        y0 = max(0, yi - 3); y1 = min(gray.shape[0] - 1, yi + 3)
+        patch = mag[y0:y1 + 1, x0:x1 + 1]
+        total += float(np.mean(patch)) if patch.size > 0 else 0.0
+    return total
+
+
+def _build_aggressive_params():
+    """Construye parámetros agresivos del detector ArUco."""
+    params = cv2.aruco.DetectorParameters()
+    params.adaptiveThreshWinSizeMin = 3
+    params.adaptiveThreshWinSizeMax = 93
+    params.adaptiveThreshWinSizeStep = 4
+    params.adaptiveThreshConstant = 7
+    params.minMarkerPerimeterRate = 0.005
+    params.maxMarkerPerimeterRate = 4.0
+    params.polygonalApproxAccuracyRate = 0.05
+    params.minCornerDistanceRate = 0.005
+    params.minDistanceToBorder = 0
+    params.minMarkerDistanceRate = 0.005
+    params.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_SUBPIX
+    params.cornerRefinementWinSize = 5
+    params.cornerRefinementMaxIterations = 50
+    return params
+
+
+def detectar_aruco(imagen, diccionario=cv2.aruco.DICT_4X4_50, refine_corners=False,
+                   max_valid_id=8):
+    """
+    Detecta marcadores ArUco en una imagen usando detección en TRES PASADAS
+    para capturar marcadores difíciles (bajo contraste, mala iluminación).
+
+    1ª pasada: Parámetros estándar sobre la imagen original.
+    2ª pasada: Parámetros agresivos sobre la imagen original.
+    3ª pasada: Imagen realzada con CLAHE + parámetros agresivos.
+
+    Para marcadores detectados en varias pasadas, se elige la detección
+    con mejor calidad de esquinas (mayor gradiente = más nítido).
+    Filtro: Se descartan IDs > max_valid_id para evitar falsos positivos.
     """
     aruco_dict = cv2.aruco.getPredefinedDictionary(diccionario)
-    parametros = cv2.aruco.DetectorParameters()
+    gray_original = cv2.cvtColor(imagen, cv2.COLOR_BGR2GRAY)
 
-    # --- HACKS PARA FORZAR LA DETECCIÓN EXTREMA ---
-    # 1. Permitir marcadores más pequeños (por si la perspectiva lo encoge)
-    parametros.minMarkerPerimeterRate = 0.015 
-    
-    # 2. Umbral adaptativo para lidiar con el oscurecimiento (viñeteo) de las esquinas
-    parametros.adaptiveThreshConstant = 7.0 
-    parametros.adaptiveThreshWinSizeMin = 3
-    parametros.adaptiveThreshWinSizeMax = 23
-    parametros.adaptiveThreshWinSizeStep = 10
-    
-    # 3. Relajar la aproximación poligonal (por si la lente lo curva/deforma un poco)
-    parametros.polygonalApproxAccuracyRate = 0.05
-    # ----------------------------------------------
+    # ===================================================================
+    # 1ª PASADA — Detección estándar
+    # ===================================================================
+    params_std = cv2.aruco.DetectorParameters()
+    params_std.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_SUBPIX
+    params_std.cornerRefinementWinSize = 5
+    params_std.cornerRefinementMaxIterations = 50
+    detector_std = cv2.aruco.ArucoDetector(aruco_dict, params_std)
+    corners_1, ids_1, _ = detector_std.detectMarkers(imagen)
 
-    detector = cv2.aruco.ArucoDetector(aruco_dict, parametros)
-    corners, ids, _ = detector.detectMarkers(imagen)
+    pasada1 = {}
+    if ids_1 is not None:
+        for i, marker_id in enumerate(ids_1.ravel()):
+            pasada1[int(marker_id)] = corners_1[i].reshape(4, 2)
+    config.info(f"[INFO] 1ª pasada (estándar): IDs {sorted(pasada1.keys())}")
 
+    # ===================================================================
+    # 2ª PASADA — Parámetros agresivos sobre imagen ORIGINAL
+    # ===================================================================
+    params_agr = _build_aggressive_params()
+    detector_agr = cv2.aruco.ArucoDetector(aruco_dict, params_agr)
+    corners_2, ids_2, _ = detector_agr.detectMarkers(imagen)
+
+    pasada2 = {}
+    if ids_2 is not None:
+        for i, marker_id in enumerate(ids_2.ravel()):
+            pasada2[int(marker_id)] = corners_2[i].reshape(4, 2)
+    config.info(f"[INFO] 2ª pasada (agresiva original): IDs {sorted(pasada2.keys())}")
+
+    # ===================================================================
+    # 3ª PASADA — CLAHE + parámetros agresivos
+    # ===================================================================
+    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+    enhanced_gray = clahe.apply(gray_original)
+    enhanced_bgr = cv2.cvtColor(enhanced_gray, cv2.COLOR_GRAY2BGR)
+
+    params_clahe = _build_aggressive_params()
+    detector_clahe = cv2.aruco.ArucoDetector(aruco_dict, params_clahe)
+    corners_3, ids_3, _ = detector_clahe.detectMarkers(enhanced_bgr)
+
+    pasada3 = {}
+    if ids_3 is not None:
+        for i, marker_id in enumerate(ids_3.ravel()):
+            pasada3[int(marker_id)] = corners_3[i].reshape(4, 2)
+    config.info(f"[INFO] 3ª pasada (CLAHE agresiva): IDs {sorted(pasada3.keys())}")
+
+    # ===================================================================
+    # FUSIÓN — Para cada marker, elegir la mejor detección por calidad
+    # ===================================================================
+    all_ids = set(pasada1.keys()) | set(pasada2.keys()) | set(pasada3.keys())
     esquinas_por_id = {}
-    if ids is not None:
-        # Optionally refine corners with subpixel precision
-        if refine_corners:
-            gray = cv2.cvtColor(imagen, cv2.COLOR_BGR2GRAY)
-            # prepare all corners in the format required by cornerSubPix: (N,1,2)
-            all_corners = []
-            id_list = []
-            for i, marker_id in enumerate(ids.ravel()):
-                c = corners[i].reshape(4, 2)
-                for corner in c:
-                    all_corners.append(corner)
-                id_list.append(int(marker_id))
 
-            if len(all_corners) > 0:
-                pts = np.array(all_corners, dtype=np.float32).reshape(-1, 1, 2)
-                # termination criteria and window sizes are standard choices
-                criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 40, 0.001)
-                cv2.cornerSubPix(gray, pts, winSize=(5,5), zeroZone=(-1,-1), criteria=criteria)
-                pts = pts.reshape(-1, 2)
+    for mid in all_ids:
+        candidates = []
+        if mid in pasada1:
+            candidates.append(('P1', pasada1[mid]))
+        if mid in pasada2:
+            candidates.append(('P2', pasada2[mid]))
+        if mid in pasada3:
+            # Re-refinar sobre la imagen original (no CLAHE)
+            pts_ref = pasada3[mid].astype(np.float32).reshape(-1, 1, 2)
+            criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 40, 0.001)
+            cv2.cornerSubPix(gray_original, pts_ref, winSize=(7, 7),
+                             zeroZone=(-1, -1), criteria=criteria)
+            candidates.append(('P3', pts_ref.reshape(4, 2)))
 
-                # rebuild per-marker arrays
-                k = 0
-                for i, marker_id in enumerate(ids.ravel()):
-                    refined = pts[k:k+4]
-                    esquinas_por_id[int(marker_id)] = refined.copy()
-                    k += 4
-        else:
-            for i, marker_id in enumerate(ids.ravel()):
-                esquinas_por_id[int(marker_id)] = corners[i].reshape(4, 2)
+        # Elegir la detección con mayor sharpness (gradiente más fuerte)
+        best_name, best_corners = max(candidates,
+                                      key=lambda c: _corner_sharpness(gray_original, c[1]))
+        esquinas_por_id[mid] = best_corners
+
+        if len(candidates) > 1:
+            names = [c[0] for c in candidates]
+            config.info(f"[INFO]   Marker {mid}: detectado en {names}, mejor → {best_name}")
+
+    # ===================================================================
+    # FILTRO DE IDs — Evitar falsos positivos
+    # ===================================================================
+    esquinas_por_id = {k: v for k, v in esquinas_por_id.items() if k <= max_valid_id}
+    config.info(f"[INFO] ArUco final (tras filtro ID<={max_valid_id}): {sorted(esquinas_por_id.keys())}")
+
+    # ===================================================================
+    # Refinamiento subpíxel final sobre imagen original
+    # ===================================================================
+    criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 40, 0.001)
+    for mid in list(esquinas_por_id.keys()):
+        pts = esquinas_por_id[mid].astype(np.float32).reshape(-1, 1, 2)
+        cv2.cornerSubPix(gray_original, pts, winSize=(7, 7),
+                         zeroZone=(-1, -1), criteria=criteria)
+        esquinas_por_id[mid] = pts.reshape(4, 2)
 
     return esquinas_por_id
 
