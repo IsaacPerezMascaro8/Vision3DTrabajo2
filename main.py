@@ -5,7 +5,7 @@ import cv2
 import config
 from cli import parse_arguments
 from utils import mostrar_img, guardar_errores_csv, dibujar_overlays_reproyeccion, guardar_resultados_json
-from rectificacion import rectificar_par_estereo, dibujar_lineas_horizontales
+from rectificacion import rectificar_par_estereo_no_calibrado, dibujar_lineas_horizontales, afinar_rectificacion
 from disparidad import calcular_error_vertical, calcular_mapa_disparidad, extraer_perfiles_disparidad
 from demostracion_ssd import demostrar_busqueda_ssd
 from geometria_epipolar import obtener_correspondencias_aruco, ransac_fundamental, calcular_esencial
@@ -79,11 +79,14 @@ def main():
     visualizar_reconstruccion_3d(X, p_ids_in, R, t, titulo="Reconstrucción 3D métrica")
 
     # 5. Rectificación y dibujo de líneas horizontales
-    img_rect1, img_rect2, R1, P1r, R2, P2r = rectificar_par_estereo(img1, img2, K, R, t)
+    # Utilizamos rectificación no calibrada (Hartley) para absorber 
+    # diferencias de distancia focal y centro óptico entre las imágenes.
+    img_rect1, img_rect2, H1, H2 = rectificar_par_estereo_no_calibrado(img1, img2, F, p1_in, p2_in)
+    
     img_rect_lines = dibujar_lineas_horizontales(
         img_rect1, img_rect2, 
         pts1=p1_in, pts2=p2_in, 
-        K=K, R1=R1, P1=P1r, R2=R2, P2=P2r
+        H1=H1, H2=H2
     )
     
     cv2.imwrite(os.path.join(outdir, 'rectified_lines_combined.png'), img_rect_lines)
@@ -91,9 +94,8 @@ def main():
     cv2.imwrite(os.path.join(outdir, 'rectified_right.png'), img_rect2)
     config.info(f"[INFO] Imágenes rectificadas guardadas en: {outdir}/")
     # 5.1 Validación vertical después de rectificación
-    dist_null = np.zeros(5)
-    pts1_rect = cv2.undistortPoints(p1_in.astype(np.float32).reshape(-1,1,2), K, dist_null, R=R1, P=P1r).reshape(-1,2)
-    pts2_rect = cv2.undistortPoints(p2_in.astype(np.float32).reshape(-1,1,2), K, dist_null, R=R2, P=P2r).reshape(-1,2)
+    pts1_rect = cv2.perspectiveTransform(p1_in.astype(np.float32).reshape(-1,1,2), H1).reshape(-1,2)
+    pts2_rect = cv2.perspectiveTransform(p2_in.astype(np.float32).reshape(-1,1,2), H2).reshape(-1,2)
     calcular_error_vertical(p1_in, p2_in, pts1_rect, pts2_rect)
     # 5.2 Mapa de disparidad densa
     if hasattr(args, 'usar_dino') and args.usar_dino:

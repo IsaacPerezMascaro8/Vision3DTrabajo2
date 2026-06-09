@@ -20,24 +20,26 @@ import config
 def detectar_aruco(imagen, diccionario=cv2.aruco.DICT_4X4_50, refine_corners=False):
     """
     Detecta marcadores ArUco en una imagen y devuelve las esquinas
-    organizadas por ID.
-
-    Parámetros
-    ----------
-    imagen : np.ndarray
-        Imagen BGR.
-    diccionario : int
-        Tipo de diccionario ArUco.
-
-    Retorna
-    -------
-    esquinas_por_id : dict
-        {marker_id: np.ndarray de forma (4, 2)} con las 4 esquinas.
+    organizadas por ID, con parámetros optimizados para esquinas y sombras.
     """
     aruco_dict = cv2.aruco.getPredefinedDictionary(diccionario)
     parametros = cv2.aruco.DetectorParameters()
-    detector = cv2.aruco.ArucoDetector(aruco_dict, parametros)
 
+    # --- HACKS PARA FORZAR LA DETECCIÓN EXTREMA ---
+    # 1. Permitir marcadores más pequeños (por si la perspectiva lo encoge)
+    parametros.minMarkerPerimeterRate = 0.015 
+    
+    # 2. Umbral adaptativo para lidiar con el oscurecimiento (viñeteo) de las esquinas
+    parametros.adaptiveThreshConstant = 7.0 
+    parametros.adaptiveThreshWinSizeMin = 3
+    parametros.adaptiveThreshWinSizeMax = 23
+    parametros.adaptiveThreshWinSizeStep = 10
+    
+    # 3. Relajar la aproximación poligonal (por si la lente lo curva/deforma un poco)
+    parametros.polygonalApproxAccuracyRate = 0.05
+    # ----------------------------------------------
+
+    detector = cv2.aruco.ArucoDetector(aruco_dict, parametros)
     corners, ids, _ = detector.detectMarkers(imagen)
 
     esquinas_por_id = {}
@@ -310,117 +312,18 @@ def ransac_fundamental(pts1, pts2,
                        confianza=0.999,
                        marker_ids=None):
     """
-    Estimación robusta de la Matriz Fundamental con RANSAC.
-
-    Parámetros
-    ----------
-    pts1, pts2 : np.ndarray (Nx2)
-        Correspondencias (mínimo 8).
-    umbral : float
-        Umbral de error de Sampson para considerar un inlier (en píxeles).
-    max_iter : int
-        Número máximo de iteraciones.
-    confianza : float
-        Nivel de confianza deseado para detención temprana.
-
-    Retorna
-    -------
-    F_mejor : np.ndarray (3x3)
-        Matriz Fundamental estimada con los mejores inliers.
-    mascara_inliers : np.ndarray (N,) bool
-        Máscara de inliers.
+    Estimación robusta de la Matriz Fundamental usando OpenCV para máxima estabilidad.
     """
+    F_mejor, mask = cv2.findFundamentalMat(pts1, pts2, cv2.FM_RANSAC, umbral, confianza)
+    if F_mejor is None:
+        raise RuntimeError("OpenCV no logró encontrar un modelo válido de Matriz Fundamental.")
+    
+    mejor_mascara = mask.ravel().astype(bool)
+    mejor_num_inliers = np.sum(mejor_mascara)
     n = len(pts1)
-    assert n >= 8, f"Se necesitan al menos 8 correspondencias, se tienen {n}."
-
-    mejor_num_inliers = 0
-    mejor_mascara = np.zeros(n, dtype=bool)
-    F_mejor = None
-
-    # Umbral al cuadrado para Sampson (la función error_sampson devuelve
-    # el valor que corresponde a la distancia al cuadrado en píxeles)
-    umbral_sq = umbral ** 2
-
-    # RNG reproducible (estilo del código de homografía)
-    rng = np.random.default_rng(42)
-
-    iteraciones_adaptativas = max_iter
-
-    for it in range(max_iter):
-        if it >= iteraciones_adaptativas:
-            break
-
-        # Seleccionar 8 puntos al azar
-        # Avoid degenerate samples: ensure sampled indices come from at least
-        # min_distinct_markers different markers (if marker_ids provided).
-        # Prefer 6 distinct markers when available (better conditioning).
-        max_sample_attempts = 100
-        if marker_ids is None:
-            indices = rng.choice(n, 8, replace=False)
-        else:
-            unique_markers = np.unique(marker_ids)
-            if len(unique_markers) >= 6:
-                required_distinct = 6
-            else:
-                required_distinct = max(4, min(6, len(unique_markers)))
-
-            for attempt in range(max_sample_attempts):
-                indices = rng.choice(n, 8, replace=False)
-                sampled_markers = np.unique(marker_ids[indices])
-                if len(sampled_markers) >= required_distinct:
-                    break
-            else:
-                # fallback: accept last sample
-                indices = rng.choice(n, 8, replace=False)
-
-        try:
-            F_candidato = eight_point_algorithm(pts1[indices], pts2[indices])
-        except Exception:
-            continue
-
-        # Calcular errores
-        errores = error_sampson(F_candidato, pts1, pts2)
-        mascara = errores < umbral_sq
-        num_inliers = np.sum(mascara)
-
-        if num_inliers > mejor_num_inliers:
-            mejor_num_inliers = num_inliers
-            mejor_mascara = mascara.copy()
-            F_mejor = F_candidato.copy()
-
-            # Actualización adaptativa del número de iteraciones (LO-RANSAC style)
-            ratio_inliers = num_inliers / n
-            if ratio_inliers > 0.0 and ratio_inliers < 1.0:
-                num_necesario = (np.log(1.0 - confianza) /
-                                 np.log(1.0 - ratio_inliers ** 8))
-                iteraciones_adaptativas = min(max_iter,
-                                              int(num_necesario) + 1)
-
-    if F_mejor is None:
-        raise RuntimeError("RANSAC no logró encontrar un modelo válido.")
-
-    # Re-estimar F con todos los inliers
-    inlier_pts1 = pts1[mejor_mascara]
-    inlier_pts2 = pts2[mejor_mascara]
-    if len(inlier_pts1) >= 8:
-        F_mejor = eight_point_algorithm(inlier_pts1, inlier_pts2)
-
-    config.info(f"[INFO] RANSAC: {mejor_num_inliers}/{n} inliers "
-        f"({100.0*mejor_num_inliers/n:.1f}%), "
-        f"iteraciones usadas: {min(it+1, iteraciones_adaptativas)}")
-
-    # Re-estimar F con todos los inliers encontrados (estilo RANSAC DLT)
-    if F_mejor is None:
-        raise RuntimeError("RANSAC no logró encontrar un modelo válido.")
-
-    inlier_pts1 = pts1[mejor_mascara]
-    inlier_pts2 = pts2[mejor_mascara]
-    if len(inlier_pts1) >= 8:
-        F_mejor = eight_point_algorithm(inlier_pts1, inlier_pts2)
-
-    config.info(f"[INFO] RANSAC: {mejor_num_inliers}/{n} inliers "
-        f"({100.0*mejor_num_inliers/n:.1f}%), "
-        f"iteraciones usadas: {min(it+1, iteraciones_adaptativas)}")
+    
+    config.info(f"[INFO] OpenCV RANSAC: {mejor_num_inliers}/{n} inliers "
+        f"({100.0*mejor_num_inliers/n:.1f}%)")
 
     return F_mejor, mejor_mascara
 
@@ -431,23 +334,10 @@ def ransac_fundamental(pts1, pts2,
 
 def calcular_esencial(F, K):
     """
-    Calcula la Matriz Esencial a partir de F y K:
-        E = K^T · F · K
-
-    Luego fuerza los valores singulares a la forma diag(σ, σ, 0) donde
-    σ = (s1 + s2) / 2.
-
-    Parámetros
-    ----------
-    F : np.ndarray (3x3)
-        Matriz Fundamental.
-    K : np.ndarray (3x3)
-        Matriz intrínseca de la cámara.
-
-    Retorna
-    -------
-    E : np.ndarray (3x3)
-        Matriz Esencial con valores singulares forzados.
+    Calcula la Matriz Esencial de forma robusta.
+    Aunque podemos usar E = K.T @ F @ K, usar la función interna
+    de OpenCV si es posible garantiza mayor estabilidad numérica.
+    Aquí mantenemos la definición matemática pura.
     """
     E_raw = K.T @ F @ K
 
@@ -462,9 +352,6 @@ def calcular_esencial(F, K):
 
     # Normalizar
     E = E / np.linalg.norm(E) * np.sqrt(2.0)
-
-    config.info(f"[INFO] Valores singulares de E (crudos):    {S}")
-    config.info(f"[INFO] Valores singulares de E (forzados):  {S_corregidos}")
 
     return E
 
